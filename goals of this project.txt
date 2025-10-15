@@ -1,0 +1,323 @@
+PROJECT SPEC — AI-ORCHESTRATED SPY (5-MIN) TRADING SYSTEM
+
+Purpose:
+A precise, machine-readable spec that tells an AI assistant exactly what to build, how modules interact, and which constraints and success criteria apply. Keep to this document unless explicitly updated.
+
+PROJECT CHARTER (WHAT WE’RE BUILDING)
+
+Goal:
+Deploy a multi-agent, AI-orchestrated system that trades SPY on 5-minute bars during US regular hours, combining technical signals with news/sentiment and macro context under strict risk controls to produce stable, risk-adjusted profits.
+
+Primary KPI Gates (must pass, otherwise no go-live):
+
+Backtest (walk-forward OOS): Profit Factor ≥ 1.30; Max Drawdown ≤ 8%; Sharpe ≥ 1.0
+
+Calibration: p(win) Brier/log-loss beats naïve; q80 range-band coverage ≥ 75–80%
+
+Paper (10 sessions): slippage ≤ 0.03%, live hit-rate within ±5% of backtest, zero risk-rule breaches
+
+Out of Scope (v1):
+
+Multi-asset trading, options, overnight positions, leverage > 1.25x, sub-minute logic, LOB microstructure
+
+SCOPE GUARDRAILS (REALISTIC SETTINGS)
+
+Instrument:
+
+SPY (primary). Comparison/breadth: QQQ, IWM, DIA (context only).
+
+Timeframe:
+
+5-minute bars, US RTH only (15:30–22:00 CET). No overnight holds. Flat before close.
+
+Capital & Risk (initial):
+
+Base capital: €10,000
+
+Risk per trade: 0.35% of equity
+
+Max daily drawdown: 1.2% hard kill-switch
+
+Max gross exposure: 1.25x notional
+
+Max concurrent positions: 1
+
+Context Pack (gates):
+
+VIX regime gate: allow trades only if VIX is in 10th–80th percentile (fallback: stand down on spikes)
+
+Breadth alignment: require ≥ 3 of {SPY, QQQ, IWM, DIA} aligned on both VWAP side and 5-min momentum sign
+
+Operational Stand-Downs:
+
+±10 minutes around scheduled top-tier news (e.g., CPI, FOMC decisions)
+
+After 3 consecutive losses in a session
+
+On data feed or clock drift anomalies
+
+AGENT MAP (MODULES, INPUTS, OUTPUTS)
+
+3.1 Market Data Feed (foundation)
+
+Input: Real-time/historical SPY 5m OHLCV; intraday VIX; QQQ/IWM/DIA 5m OHLCV
+
+Output: Clean bar stream; synchronized timestamps; rolling features cache
+
+3.2 Technical Analysis Agent
+
+Input: SPY 5m OHLCV (last N bars), derived features (ATR%, EMA diff, RSI, VWAP deviation, momentum)
+
+Core logic: trend-follow, mean-reversion, breakout, volatility regime tagging
+
+Output (each bar):
+{ ts, symbol: "SPY",
+signal_dir ∈ {−1, 0, +1},
+signal_strength ∈ [0,1],
+features: {atr_pct, ema12, ema26, ema_diff, rsi14, vwap_dev, ...},
+rationale: "trend+rsi+vol" }
+
+3.3 News & Sentiment Agent
+
+Input: Curated financial headlines, economic headlines, social chatter (X/Twitter), vendor sentiment where available
+
+Processing: classifier(s) for bullish/bearish/neutral; shock detection (event type, novelty), rolling sentiment index
+
+Output (event-driven and on bar):
+{ ts, news_score ∈ [−1,1], social_score ∈ [−1,1],
+shock: { type: "Fed/Geo/Earnings/Other", novelty ∈ [0,1] },
+summary: "Dovish Fed tone; positive headline drift" }
+
+3.4 Macro & Regime Agent
+
+Input: Economic calendar (CPI, FOMC, NFP, GDP), UST10y yield snapshot, DXY, VIX percentile
+
+Processing: regime labeling (risk-on/off; vol-normal/elevated), surprise assessment on releases
+
+Output (on bar and events):
+{ ts, regime: { risk: "on/off", vol: "low/normal/high" },
+vix_pctile, yields: {ust10}, dxy,
+event_window: { name?, t_release?, within_window: bool },
+macro_bias ∈ {bearish, neutral, bullish} }
+
+3.5 Prediction Layer (calibrated models)
+
+Input: Fused structured features from Technical, News, Macro
+
+Models:
+
+p(win)_long, p(win)_short: logistic/GBM, calibrated
+
+Range quantiles: q20/q50/q80 (next-bar absolute return), quantile regression
+
+Output:
+{ ts, pwin_long, pwin_short, q20, q50, q80 }
+
+3.6 LLM Orchestrator (AI-driven manager)
+
+Input: All agent outputs (Tech, News, Macro, Predictions), Context Pack gates
+
+Responsibilities:
+
+Signal synthesis: resolve conflicts; weight components by regime (e.g., trust news more in high-vol)
+
+Decision logic: propose action {long/short/flat} with intent_weight ∈ [0,1]
+
+Procedural safety: enforce playbooks (news windows, VIX/breadth gates, daily limits)
+
+Explainability: produce concise trade thesis
+
+Output:
+{ ts, action ∈ {long, short, flat}, intent_weight ∈ [0,1],
+thesis: "Bullish breakout + dovish tone; breadth OK; vol normal",
+guards: { breadth_ok: bool, vix_ok: bool, news_window: bool } }
+
+3.7 Risk Management Agent
+
+Input: Orchestrator decision, Prediction Layer (q-bands), live exposure, risk limits
+
+Responsibilities:
+
+Risk metrics: VaR, CVaR (session-level), live drawdown, exposure
+
+Sizing: function of risk per trade, ATR/q50 distance, intent_weight, regime
+
+Controls: veto/scale/stand-down; set stops/TPs; prevent pyramid/average-down
+
+Output (approved intent or veto):
+{ ts, target_position (signed units/notional),
+stops: { hard, trailing? }, tps: { t1, t2? },
+max_risk, notes }
+
+3.8 Execution Agent
+
+Input: Risk-approved intent
+
+Responsibilities:
+
+Order placement (market/limit policy), IOC protection, partial fill handling
+
+Confirm fills; update position state; flat by session end
+
+Output:
+
+order/place, order/fill events; execution stats (slippage, latency)
+
+3.9 Telemetry & Audit
+
+Persistent logs: inputs, decisions, risk checks, orders, fills
+
+Artifacts: daily summary with KPIs; rationale transcripts; error reports
+
+DECISION PIPELINE (EVENTS & FALLBACKS)
+
+Happy-path per bar (candidate trade):
+
+Market Data → Technical/News/Macro update
+
+Prediction Layer computes p(win) and q-bands
+
+LLM Orchestrator proposes action + thesis, checks Context Pack gates
+
+Risk Agent sizes or vetoes; attaches stops/TPs
+
+Execution places orders; fills reported; state updated
+
+Fallbacks:
+
+News API outage → trade with tech+macro only; cap size at 50%
+
+VIX stale → disable VIX gate; require breadth OK; size −50%
+
+LLM timeout → deterministic fusion weights; size −30%
+
+Model scores missing → rules-only trades; size ≤ 30%
+
+Vol spike (VIX pctile > 90) → stand-down 15 minutes
+
+Daily DD hit → global kill-switch until next session
+
+Latency budgets (per candidate decision):
+
+Feature+models ≤ 50 ms; LLM orchestration ≤ 300 ms; Risk ≤ 20 ms; End-to-end ≤ 400 ms
+
+If any budget exceeded → stand-down for this bar (no trade)
+
+STRATEGY PALETTE (V1 AUTHORIZED SETUPS)
+
+Only one active live until acceptance gates passed; others allowed in backtests.
+
+A) ORB-15 (Opening Range Breakout, first 15 minutes)
+
+Enter on break with breadth OK, VIX in gate, macro not-risk-off
+
+Stops/targets from q-bands; trail if momentum persists
+
+B) EMA(20/50) Pullback Trend-Follow
+
+Trade with trend; avoid RSI(45–55) chop; macro neutral-to-bullish only for longs
+
+C) VWAP Reversion (low ATR% regime)
+
+Fade large VWAP deviations when macro neutral and no fresh shock
+
+D) NR7/Inside-Range Expansion
+
+Take first expansion after compression with volatility filter
+
+DATA & QUALITY REQUIREMENTS
+
+All timestamps synchronized; clock drift < 200 ms
+
+Missing data handling: forward-fill only for non-price context; never for OHLCV
+
+Feature store: reproducible, versioned; train/test leakage strictly avoided
+
+Secrets: never hard-coded; run in read-only paper keys for CI
+
+EVALUATION & REPORTING
+
+Backtests:
+
+Walk-forward splits; realistic slippage; transaction costs
+
+KPIs: PF, DD, Sharpe, turnover, hit-rate, avg win/loss, exposure time
+
+Calibration: Brier/log loss (pwin), q-band coverage (q20/50/80)
+
+Paper Trading (10 sessions):
+
+Compare live vs backtest deltas; slippage; rule adherence; incident log
+
+Daily Report (auto-generated):
+
+Trades taken/skipped with reasons; PnL; risk metrics; rationale excerpts
+
+Anomalies and any stand-down triggers
+
+DEPLOYMENT NOTES (NOT FIRST PRIORITY BUT FIXED RULES)
+
+Environments: backtest → paper → live (tiny) with identical code paths
+
+Branch protection: PR + CI green required; regression gates on KPIs
+
+Rollbacks: ability to revert to previous version within 1 minute
+
+Observability: logs, metrics, alerts integrated; audit trail preserved
+
+GLOSSARY (MACHINE-READABLE DEFINITIONS)
+
+signal_dir: −1 short, 0 flat, +1 long
+
+signal_strength: normalized confidence [0,1]
+
+pwin_long/short: predicted win probability for next-bar conditional on direction
+
+q20/q50/q80: absolute return quantiles for next bar; used for stops/targets/sizing
+
+breadth_ok: ≥ 3 of {SPY, QQQ, IWM, DIA} aligned on VWAP side and 5m momentum
+
+vix_pctile: percentile of VIX vs last ~60 sessions
+
+intent_weight: orchestrator’s action weight [0,1] before risk scaling
+
+stand-down: no new trades for defined interval
+
+DEFINITION OF DONE (PER MODULE)
+
+Technical/News/Macro: emits specified payloads every bar or on events; unit tests for feature correctness
+
+Prediction Layer: calibrated metrics reported; model cards stored
+
+LLM Orchestrator: produces action + thesis; respects gates; has timeout fallback
+
+Risk: enforces limits; emits veto/scale decisions; stop/TP logic verified
+
+Execution: places orders; handles partials; flattens by close; reports slippage
+
+Telemetry: daily report generated with KPIs and rationales
+
+END OF SPEC FILE.
+
+-Working Agreement & Scope Guardrails -- what we aim for this système (realsitic goals)
+Instrument:Default SPY
+Timeframe: Default 5m
+Capital & risk: Default €10k
+index alignment: QQQ/IWM/DIA
+Deployment: -need precision but not our first priority
+system :
+-Tech Analysis.
+	input:digesting price and volume patterns from SPY’s 5-minute chart
+	Output: The technical agent produces real-time signals (trend direction, momentum strength, support/resistance levels, etc.) along with confidence scores.
+-news analysis:
+	input:Financial News Feeds/Social Media Sentiment/Market Sentiment Index
+	output:this agent gives the system an information edge – capturing catalysts that pure technical models would miss.
+-Macro & Fundamental Analysis
+	input:Macroeconomic Indicators/Fundamental Market Health/Regime Identification
+	outputprovides contextual signals,By including this agent, our trading system can align trades with macro trends (riding tailwinds and avoiding fighting the tide)
+-Risk Management:
+	what it does: Risk Metrics Calculation/Position Sizing & Leverage Control/Trade Blocking & Stop Management/Portfolio-Level Risk
+
+-AI Driven Manager:
+	input:all the output of the previous systeme
+	what it does: Signal Synthesis/Decision Logic/Risk Adjustment & Confirmation/Execution and Feedback
