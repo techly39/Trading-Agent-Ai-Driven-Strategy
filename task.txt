@@ -1,0 +1,243 @@
+TASK ID: DF1
+TITLE: Implement Market Data Feed (SPY 5m + VIX/QQQ/IWM/DIA), Historical + Paper/Live Interfaces
+
+OBJECTIVE
+
+Build the Market Data Feed module that publishes normalized 5-minute bars for SPY and aligned context bars for VIX, QQQ, IWM, and DIA. Provide historical replay and paper/live interfaces behind one API.
+
+CONTEXT SNAPSHOT (READ-ONLY)
+
+Project: AI-orchestrated SPY 5-minute trading system (US RTH only, flat by close)
+
+Downstream modules depend on this feed for bars and context alignment
+
+Context Pack gates rely on VIX percentile and 3-of-4 breadth (SPY/QQQ/IWM/DIA)
+
+Non-goals in DF1: feature engineering, prediction models, orchestration, risk, execution
+
+DEFINITION OF DONE (DoD)
+
+Functional:
+
+HistoricalFeed and Paper/LiveFeed expose the same interface
+
+Publish SPY bars at 5-minute cadence during RTH (15:30–22:00 CET; 09:30–16:00 ET)
+
+Align and publish context bars (VIX, QQQ, IWM, DIA) to the same 5-minute buckets as SPY
+
+Deterministic replay with monotonic per-session seq per symbol
+
+Non-Functional:
+
+Latency: process + fan-out a bar in < 20 ms median
+
+Deterministic UTC timestamps; idempotent replay
+
+Structured logging at INFO/WARN/ERROR with clear anomaly codes
+
+Config-driven via YAML + env overrides; zero secrets in code
+
+Documentation:
+
+README for this module (scope, configuration, how to run tests and a 1-day smoke replay)
+
+Tests:
+
+Unit tests: schema conformance, session filter, alignment, gap detection, dedupe/out-of-order, replay determinism, performance sanity
+
+Smoke test: 1 trading-day replay for 5 symbols
+
+CI:
+
+Tests + lint/type checks pass in CI
+
+PUBLIC INTERFACES (STABLE)
+Bar schema (normalized JSON-like):
+
+{ ts: ISO8601 UTC string,                 // e.g., "2025-10-14T14:35:00Z"
+  symbol: "SPY|QQQ|IWM|DIA|VIX",
+  open: float, high: float, low: float, close: float,
+  volume: float|null,                      // VIX may be null
+  source: "historical|paper|live",
+  seq: int }                               // monotonically increasing per symbol per session
+
+
+Feed API:
+
+subscribe(symbols: list[str], on_bar: Callable[Bar]) -> Subscription
+
+start(session_date: date, mode: "historical|paper|live")
+
+stop()
+
+replay(session_date, from_ts?: datetime, to_ts?: datetime) // deterministic, idempotent
+
+get_last_bar(symbol) -> Bar | None
+
+Context helper:
+
+align_context(spy_bar: Bar) -> dict // returns latest bars for {VIX, QQQ, IWM, DIA} with ts <= spy_bar.ts in the same 5-minute bucket
+
+Topics (events to publish):
+
+bar.update // payload = Bar
+
+ops.event // codes: GAP, DUPLICATE, OUT_OF_ORDER, CLOCK_DRIFT, PROVIDER_ERROR
+
+health.heartbeat // every 60s with latest seq per symbol
+
+NOTE: Do not change these interfaces without approval.
+
+INPUTS & DATA
+
+Historical (required for DF1; no credentials):
+
+data/spy_5m.parquet
+
+data/vix_5m.parquet
+
+data/qqq_5m.parquet
+
+data/iwm_5m.parquet
+
+data/dia_5m.parquet
+
+Paper/Live (stubs in DF1):
+
+Providers: Alpaca/IBKR/Polygon (config only). If env keys missing, return “not enabled” cleanly.
+
+Time handling:
+
+Internal UTC everywhere; Europe/Paris only for display
+
+Session: US RTH 09:30–16:00 ET → 15:30–22:00 CET
+
+SESSION & TIME RULES
+
+Build SessionCalendar utility:
+
+Validates trading days/holidays
+
+Emits canonical 5-minute buckets :00, :05, :10, ...
+
+Drops off-session bars (historical) and ignores them (live)
+
+End-of-day: emit ops.event{type:"session_close"}; downstream expected to be flat (future module)
+
+DATA QUALITY & FALLBACKS
+
+Gaps: if a bucket is missing, emit ops.event{code:"GAP", symbols:[...], ts_range:...}; optional null-bar fill for tests; never forward-fill OHLCV
+
+Duplicates/out-of-order: dedupe by (symbol, ts); keep latest; log WARN
+
+Stale/missing context: align to last context bar ≤ bucket time; if none exists, omit and log WARN
+
+Clock drift: if abs(now_utc − system_clock) > 200 ms, emit ops.event{code:"CLOCK_DRIFT"} and pause feed until resynced
+
+Provider outage: exponential backoff with jitter; bounded wait; emit ops.event
+
+VIX & BREADTH RULES
+
+VIX treated as index level (volume null); publish on the same 5-minute cadence using last known within bucket
+
+Breadth (QQQ/IWM/DIA) delivered per 5-minute bucket; maintain seq alignment with SPY for the same session
+
+PERFORMANCE & RELIABILITY
+
+Throughput: publish all 78 RTH buckets for 5 symbols in < 200 ms in test mode
+
+Retries: base 200 ms, max 5 s, jitter, max attempts 5
+
+Resource caps: stop() must interrupt loops; no unbounded memory growth
+
+CONFIGURATION
+YAML keys (example):
+
+symbols: ["SPY"]
+context_symbols: ["QQQ","IWM","DIA","VIX"]
+timeframe: "5m"
+session:
+  tz_display: "Europe/Paris"
+  rth_only: true
+paths:
+  spy: "data/spy_5m.parquet"
+  vix: "data/vix_5m.parquet"
+  qqq: "data/qqq_5m.parquet"
+  iwm: "data/iwm_5m.parquet"
+  dia: "data/dia_5m.parquet"
+live:
+  provider: "alpaca"     # or "ibkr" | "polygon"
+  env_keys: ["API_KEY","API_SECRET"]
+  enabled: false
+retry:
+  max_attempts: 5
+  base_ms: 200
+  max_ms: 5000
+  jitter: true
+
+
+DELIVERABLES (FILES TO ADD/MODIFY)
+
+trading_system/core/events.py // topics + dataclasses/pydantic schemas
+
+trading_system/utils/session.py // calendar, bucketization, RTH filter, CET helpers
+
+trading_system/data/feeds.py // interfaces + HistoricalFeed + Paper/Live stubs + align_context
+
+tests/test_feeds_schema.py
+
+tests/test_feeds_session.py
+
+tests/test_feeds_alignment.py
+
+tests/test_feeds_integrity.py // gaps, duplicates, replay determinism
+
+tests/test_feeds_performance.py
+
+config/settings.yaml // as above
+
+README.md (module scope, config, examples)
+
+GUARDRAILS (DO NOT DO)
+
+No trading logic, features, or models in DF1
+
+No external network calls in unit tests (integration tests must be optional/marked)
+
+No secrets in repo; if keys missing, live feed must disable gracefully
+
+WORKFLOW (PR REQUIREMENTS)
+
+Branch: feature/DF1-market-data-feed
+
+PR title: “DF1: Implement Market Data Feed (SPY 5m + VIX/Breadth)”
+
+PR must include:
+
+Summary of changes
+
+Design notes & trade-offs
+
+Test plan & outputs (paste logs or attach artifacts)
+
+Performance note (time to publish 1-day smoke)
+
+Known limitations & follow-ups
+
+DoD checklist (checked)
+
+ACCEPTANCE CHECKLIST (TICK BEFORE MERGE)
+
+ Interfaces match spec (schemas, methods, topics)
+
+ Bars are UTC, 5-minute bucketed, RTH only
+
+ align_context returns correct context per SPY bar
+
+ Gaps/duplicates handled and logged
+
+ Replay deterministic with monotonic seq
+
+ Performance test passes; CI green
+
+ README complete and accurate with a Manual with how to use the system
