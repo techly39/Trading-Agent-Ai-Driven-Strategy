@@ -1,0 +1,27 @@
+{
+  "symbols": ["SPY"],
+  "context_symbols": ["QQQ", "IWM", "DIA", "VIX"],
+  "timeframe": "5m",
+  "session": {
+    "tz_display": "Europe/Paris",
+    "rth_only": true
+  },
+  "paths": {
+    "spy": "data/spy_5m.parquet",
+    "vix": "data/vix_5m.parquet",
+    "qqq": "data/qqq_5m.parquet",
+    "iwm": "data/iwm_5m.parquet",
+    "dia": "data/dia_5m.parquet"
+  },
+  "live": {
+    "provider": "alpaca",
+    "env_keys": ["API_KEY", "API_SECRET"],
+    "enabled": false
+  },
+  "retry": {
+    "max_attempts": 5,
+    "base_ms": 200,
+    "max_ms": 5000,
+    "jitter": true
+  }
+}
